@@ -53,6 +53,18 @@ const PmidLogic = {
             console.log(`[Logic] All API strategies failed for ${pmid}. Trying Fallback...`);
         }
 
+        // --- 2.5 Embase Strategy (Before LibKey) ---
+        try {
+            console.log(`[Logic] Trying Embase strategy for ${pmid}...`);
+            const embaseResult = await this.strategyEmbase(pmid);
+            if (embaseResult) {
+                console.log(`[Logic] Found via Embase: ${embaseResult.url}`);
+                return embaseResult;
+            }
+        } catch (e) {
+            console.log(`[Logic] Embase strategy failed: ${e.message}`);
+        }
+
         // --- 3. LibKey.io Strategy (Secondary Fallback) ---
         try {
             console.log(`[Logic] Trying LibKey.io fallback for ${pmid}...`);
@@ -63,6 +75,19 @@ const PmidLogic = {
             }
         } catch (e) {
             console.log(`[Logic] LibKey.io strategy failed: ${e.message}`);
+        }
+
+        // --- 3.8 Anna's Archive Scraper (集成版) ---
+        try {
+            console.log(`[Logic] Trying Anna's Archive Scraper for ${pmid}...`);
+            // 传入 DOI 和 PMID，优先用 DOI 搜
+            const annasResult = await this.strategyAnnasArchiveScraper(pmid, doi); 
+            if (annasResult) {
+                console.log(`[Logic] Found via Anna's Archive Scraper: ${annasResult.url}`);
+                return annasResult;
+            }
+        } catch (e) {
+            console.log(`[Logic] Anna's scraper failed: ${e.message}`);
         }
 
         // --- 4. Sci-Hub (The "Nuclear Option" - Last Resort) ---
@@ -140,6 +165,82 @@ const PmidLogic = {
         throw new Error("Sci-Hub failed");
     },
 
+    async strategyEmbase(pmid) {
+        // Embase search usually requires more complex interaction or API access.
+        // Assuming a direct search URL pattern for demonstration or if it redirects to full text.
+        // Since Embase is a subscription database, this might be a "Tab" strategy to let user login/access via IP.
+        
+        // Construct a search URL for Embase
+        // Note: Embase doesn't have a simple public "get PDF" API like Unpaywall. 
+        // We will try to open a search result page which might lead to the PDF.
+        const searchUrl = `https://www.embase.com/records?subaction=viewrecord&id=L${pmid}`; 
+        
+        // However, a better approach for "Tab Mode" might be checking if we can find a direct link via DOI on a partner site if Embase redirects there.
+        // For now, let's treat it as a Tab-based discovery attempt.
+        
+        return { url: searchUrl, source: 'Embase', method: 'tab' };
+    },
+
+    // --- 新增：Anna's Archive 爬虫策略 (移植自 annas-archive-api) ---
+    async strategyAnnasArchiveScraper(pmid, doi) {
+        // 1. 优先尝试 SciDB 直链 (速度最快)
+        if (doi) {
+            const scidbUrl = `https://annas-archive.li/scidb/${doi}`;
+            const isAvailable = await this.checkUrlAccessibility(scidbUrl);
+            if (isAvailable) {
+                return { url: scidbUrl, source: "Anna's Archive (SciDB)", method: 'tab' };
+            }
+        }
+
+        // 2. 如果直链失败，执行搜索爬虫逻辑
+        console.log(`[Logic] SciDB failed, starting scraper for ${pmid}...`);
+        
+        // 构造查询：优先用 DOI，没有则用 PMID
+        const query = doi || pmid;
+        if (!query) throw new Error("No query for Anna's Archive");
+
+        try {
+            // A. 获取搜索结果页
+            const searchUrl = `https://annas-archive.li/search?q=${encodeURIComponent(query)}`;
+            const searchRes = await fetch(searchUrl);
+            const searchHtml = await searchRes.text();
+
+            // B. 解析出第一个匹配的 MD5 详情页链接
+            const md5Path = this.parseAnnasArchiveSearch(searchHtml);
+            if (!md5Path) throw new Error("No search results found on Anna's Archive");
+
+            // C. 获取 MD5 详情页 (即下载页)
+            const md5Url = `https://annas-archive.li${md5Path}`;
+            // 此时我们已经拿到了具体的书本页面，可以直接返回这个 URL 让 Dashboard 在 Tab 中打开
+            // 这样用户进去后，Dashboard 的嗅探器会自动识别页面上的 "Slow Partner" 链接
+            
+            return { url: md5Url, source: "Anna's Archive (Scraper)", method: 'tab' };
+
+        } catch (e) {
+            console.warn("[Logic] Anna's Archive Scraper failed:", e);
+            return null;
+        }
+    },
+
+    // 辅助函数：解析搜索结果 HTML
+    parseAnnasArchiveSearch(html) {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, "text/html");
+        
+        // Anna's Archive 的搜索结果通常是列表，链接包含 /md5/
+        // 我们寻找主要结果区域的链接
+        const links = Array.from(doc.querySelectorAll('a[href*="/md5/"]'));
+        
+        for (const link of links) {
+            // 排除一些可能的广告或无关链接，通常第一个就是最佳匹配
+            const href = link.getAttribute('href');
+            if (href && href.startsWith('/md5/')) {
+                return href;
+            }
+        }
+        return null;
+    },
+
     // 【新增】LibKey 策略
     async strategyLibKey(pmid, doi) {
         const validDoi = doi || await this.getDoiFromPmid(pmid);
@@ -196,9 +297,7 @@ const PmidLogic = {
             
             const res = await fetch(url, { 
                 method: 'HEAD', 
-                signal: controller.signal,
-                // Avoid CORS issues for simple checks if possible, or handle them in catch
-                mode: 'no-cors' 
+                signal: controller.signal
             });
             clearTimeout(timeoutId);
             // In 'no-cors' mode, we get an opaque response (status 0), but it means network is reachable.

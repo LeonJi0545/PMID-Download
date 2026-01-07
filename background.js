@@ -13,44 +13,65 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 });
 
-const RULE_ID = 1;
+const RULE_ID_SPOOF = 1;
+const RULE_ID_CSP = 2;
 
 async function applySpoofingRules() {
     // Remove old rules, add new rules
     await chrome.declarativeNetRequest.updateDynamicRules({
-        removeRuleIds: [RULE_ID],
+        removeRuleIds: [RULE_ID_SPOOF, RULE_ID_CSP],
         addRules: [
+            // Rule 1: Request Headers Spoofing (Anti-Bot)
             {
-                "id": RULE_ID,
+                "id": RULE_ID_SPOOF,
                 "priority": 1,
                 "action": {
                     "type": "modifyHeaders",
                     "requestHeaders": [
                         // Spoof Referer to bypass publisher anti-bot checks
                         { "header": "Referer", "operation": "set", "value": "https://scholar.google.com/" },
-                        // Note: We avoid setting 'Origin' globally as it breaks CSP for many sites
                         // Remove headers that might expose the extension identity
                         { "header": "Sec-Fetch-Site", "operation": "remove" }
                     ]
                 },
                 "condition": {
-                    // Only apply to academic domains to avoid breaking other websites
+                    // Only apply to academic domains
                     "urlFilter": "*",
-                    "initiatorDomains": ["wiley.com", "springer.com", "sciencedirect.com", "sci-hub.se", "sci-hub.st", "sci-hub.ru"],
-                    // Do not interfere with static assets like scripts and fonts (fixes CSP errors)
-                    "excludedResourceTypes": ["script", "stylesheet", "font", "image"]
+                    "initiatorDomains": ["wiley.com", "onlinelibrary.wiley.com", "springer.com", "link.springer.com", "sciencedirect.com", "sci-hub.se", "sci-hub.st", "sci-hub.ru", "embase.com", "annas-archive.li"],
+                    // STRICTLY LIMIT spoofing to document requests and API calls. 
+                    // NEVER spoof scripts/styles/images, as it breaks CORS/CSP.
+                    "resourceTypes": ["main_frame", "sub_frame", "xmlhttprequest"] 
+                }
+            },
+            // Rule 2: Response Headers Stripping (Fix CSP Errors)
+            {
+                "id": RULE_ID_CSP,
+                "priority": 9999,
+                "action": {
+                    "type": "modifyHeaders",
+                    "responseHeaders": [
+                        { "header": "Content-Security-Policy", "operation": "remove" },
+                        { "header": "Content-Security-Policy-Report-Only", "operation": "remove" },
+                        { "header": "X-Frame-Options", "operation": "remove" } // Also allow framing if needed
+                    ]
+                },
+                "condition": {
+                    // Aggressive: Remove CSP from EVERYTHING to prevent script blocking
+                    "urlFilter": "*",
+                    // Removed initiatorDomains restriction to ensure it hits all possible iframes/scripts
+                    "resourceTypes": ["main_frame", "sub_frame", "xmlhttprequest", "script", "stylesheet", "font", "image", "other"]
                 }
             }
         ]
     });
-    console.log("✅ Anti-Bot Rules Applied: Referer set to Google Scholar");
+    console.log("✅ Anti-Bot Rules & CSP Stripping Applied");
 }
 
 async function clearSpoofingRules() {
     await chrome.declarativeNetRequest.updateDynamicRules({
-        removeRuleIds: [RULE_ID]
+        removeRuleIds: [RULE_ID_SPOOF, RULE_ID_CSP]
     });
-    console.log("🚫 Anti-Bot Rules Cleared");
+    console.log("🚫 Rules Cleared");
 }
 
 // Listen for commands from dashboard
