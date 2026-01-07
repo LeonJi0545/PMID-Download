@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>PMID PDF Downloader - Dashboard</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f5f7fa;
+            color: #333;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+        }
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .step {
+            font-weight: bold;
+            color: #3498db;
+            margin-bottom: 10px;
+            display: block;
+        }
+        textarea {
+            width: 100%;
+            height: 200px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-family: monospace;
+            margin-bottom: 10px;
+        }
+        button {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        button:disabled {
+            background-color: #bdc3c7;
+            cursor: not-allowed;
+        }
+        button.secondary {
+            background-color: #95a5a6;
+        }
+        button.secondary:hover {
+            background-color: #7f8c8d;
+        }
+        #folderStatus {
+            margin-left: 10px;
+            font-style: italic;
+            color: #27ae60;
+        }
+        .log-container {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 15px;
+            border-radius: 4px;
+            height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 13px;
+        }
+        .log-entry { margin-bottom: 5px; border-bottom: 1px solid #34495e; padding-bottom: 2px; }
+        .result-entry { 
+            margin-bottom: 5px; 
+            padding-bottom: 4px; 
+            border-bottom: 1px solid #e0e0e0; /* Lighter separator */
+            width: 96%; /* Shorter width */
+            margin-left: auto; 
+            margin-right: auto;
+            color: #27ae60;
+            font-size: 14px;
+        }
+        .success { color: #2ecc71; }
+        .error { color: #e74c3c; }
+        .warn { color: #f1c40f; }
+    </style>
+</head>
+<body>
+
+    <h1>📥 PMID Downloader Tools</h1>
+
+    <div class="card">
+        <span class="step">Step 1: Select Output Directory</span>
+        <button id="selectDirBtn">📂 Select Download Folder</button>
+        <span id="folderStatus">No folder selected</span>
+        
+        <div style="margin-top: 15px; display: flex; align-items: center;">
+            <input type="checkbox" id="enableSciHub" checked style="width: 18px; height: 18px; margin-right: 8px; cursor: pointer;">
+            <label for="enableSciHub" style="font-weight: bold; color: #e74c3c; cursor: pointer;">Enable Sci-Hub Search (Fallback Strategy)</label>
+        </div>
+    </div>
+
+    <div class="card">
+        <span class="step">Step 2: Enter PMIDs (Comma or Newline separated)</span>
+        <textarea id="pmidInput" placeholder="eg:
+37217273
+39244595"></textarea>
+        <br>
+        <button id="startBtn" disabled>🚀 Start Auto-Fetch & Download</button>
+    </div>
+
+    <div class="card">
+        <span class="step">Step 3: Monitor Progress</span>
+        
+        <h3>Download Log</h3>
+            <div id="logArea" class="log-container"></div>
+
+            <h3>Download Success</h3>
+            <div id="resultArea" class="log-container" style="height: 150px; border-top: 5px solid #f0f0f0; background: #ffffff; color: #333; border: 1px solid #ddd;"></div>
+
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h3>Download Error</h3>
+                <div>
+                    <button id="copyErrorsBtn" class="secondary" style="padding: 5px 10px; font-size: 12px; height: 30px; margin-right: 5px;" title="Copy Failed PMIDs">📋 Copy Failed PMIDs</button>
+                    <button id="copyErrorListBtn" class="secondary" style="padding: 5px 10px; font-size: 12px; height: 30px;" title="Copy Full Error Log">📑 Copy Failed List</button>
+                </div>
+            </div>
+            <div id="errorArea" class="log-container" style="height: 150px; background: #fff0f0; color: #c0392b; border: 1px solid #e74c3c;"></div>
+    </div>
+    <!-- Include Logic Script First -->
+    <script src="pmid_logic.js"></script>
+    <script src="dashboard.js"></script>
+</body>
+</html>

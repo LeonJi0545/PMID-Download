@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body {
+      width: 300px;
+      padding: 20px;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #f9f9f9;
+      text-align: center;
+    }
+    h3 {
+      color: #2c3e50;
+      margin-top: 0;
+      margin-bottom: 15px;
+    }
+    .description {
+      font-size: 13px;
+      color: #666;
+      margin-bottom: 20px;
+      line-height: 1.5;
+    }
+    button {
+      background-color: #3498db;
+      color: white;
+      border: none;
+      padding: 12px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 14px;
+      width: 100%;
+      transition: background-color 0.3s;
+      box-shadow: 0 2px 5px rgba(52, 152, 219, 0.3);
+    }
+    button:hover {
+      background-color: #2980b9;
+    }
+    .dog-note {
+      font-size: 11px;
+      color: #999;
+      margin-top: 20px;
+      font-style: italic;
+    }
+    .icon {
+      font-size: 40px;
+      margin-bottom: 10px;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <span class="icon">📥</span>
+  <h3>PMID PDF Downloader</h3>
+  
+  <p class="description">
+    Please use the Dashboard for full features:
+    <br>✅ Auto-Fetch PDF URL
+    <br>✅ Silent Download (No Prompts)
+    <br>✅ Save to Any Folder
+  </p>
+
+  <button id="dashboardBtn">🚀 Open Dashboard</button>
+  
+  <div class="dog-note">"I'll fetch them all!"</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
