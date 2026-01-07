@@ -4,7 +4,7 @@ const CONFIG = {
     API_KEY: '3263cf5249bb15d2967832047fd05a82c108',
     ELSEVIER_API_KEY: '3263cf5249bb15d2967832047fd05a82c108',
     TOOL_NAME: 'chrome_extension_downloader',
-    SCHOOL_ID: 256
+    SCHOOL_ID: 265
 };
 
 const PmidLogic = {
@@ -146,7 +146,7 @@ const PmidLogic = {
         if (!validDoi) throw new Error("No DOI for LibKey");
         
         // LibKey Generic Format
-        const url = `https://libkey.io/libraries/${CONFIG.SCHOOL_ID}/${validDoi}`; // 261 is a generic library ID, usually redirects to DOI
+        const url = `https://libkey.io/libraries/${CONFIG.SCHOOL_ID}/${validDoi}`;
         // Better: Use the DOI directly if LibKey isn't specific
         return { url: url, source: 'LibKey.io', method: 'tab' };
     },
