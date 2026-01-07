@@ -8,6 +8,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else if (message.action === 'disableSpoofing') {
         clearSpoofingRules();
         sendResponse({ status: 'Spoofing Disabled' });
+    } else if (message.action === 'ping') {
+        sendResponse({ status: 'pong' });
     }
 });
 
@@ -24,17 +26,19 @@ async function applySpoofingRules() {
                 "action": {
                     "type": "modifyHeaders",
                     "requestHeaders": [
-                        // Spoof Referer to make Wiley think you are coming from Google Scholar
+                        // Spoof Referer to bypass publisher anti-bot checks
                         { "header": "Referer", "operation": "set", "value": "https://scholar.google.com/" },
-                        { "header": "Origin", "operation": "set", "value": "https://scholar.google.com/" },
+                        // Note: We avoid setting 'Origin' globally as it breaks CSP for many sites
                         // Remove headers that might expose the extension identity
                         { "header": "Sec-Fetch-Site", "operation": "remove" }
                     ]
                 },
                 "condition": {
-                    // Apply to all requests, or restrict to specific academic domains
-                    "resourceTypes": ["xmlhttprequest", "main_frame", "sub_frame"],
-                    "urlFilter": "*" 
+                    // Only apply to academic domains to avoid breaking other websites
+                    "urlFilter": "*",
+                    "initiatorDomains": ["wiley.com", "springer.com", "sciencedirect.com", "sci-hub.se", "sci-hub.st", "sci-hub.ru"],
+                    // Do not interfere with static assets like scripts and fonts (fixes CSP errors)
+                    "excludedResourceTypes": ["script", "stylesheet", "font", "image"]
                 }
             }
         ]

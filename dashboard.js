@@ -2,6 +2,7 @@
 
 let dirHandle = null;
 let failedPmids = []; // 明确初始化
+let failedErrors = []; // 详细错误记录
 
 // --- 1. 文件夹选择逻辑 ---
 document.getElementById('selectDirBtn').addEventListener('click', async () => {
@@ -60,10 +61,17 @@ async function processBatch(pmids) {
     if(errorContainer) errorContainer.innerHTML = '';
     
     failedPmids = [];
+    failedErrors = [];
     let success = 0, fail = 0;
 
-    for (const pmid of pmids) {
+    // --- 并发控制 (Concurrency Control) ---
+    const CONCURRENCY = 3; // 同时处理 3 个任务
+    const queue = [...pmids];
+    
+    // 单个任务处理函数
+    const processSinglePmid = async (pmid) => {
         log(`[${pmid}] Analyzing...`);
+        chrome.runtime.sendMessage({ action: 'ping' }); // Keep SW alive
         
         try {
             // A. 解析链接
@@ -72,38 +80,61 @@ async function processBatch(pmids) {
             if (!result || !result.url) throw new Error("Link not found");
             
             log(`[${pmid}] Strategy: ${result.source}`, 'blue');
+            // Debug Log
+            // log(`[${pmid}] URL: ${result.url}`, 'info');
+
             let blob = null;
 
             // B. 尝试直连下载 (如果是 OA 或 API)
             if (result.method === 'direct') {
                 try {
                     const res = await fetchWithRetry(result.url);
+                    log(`[${pmid}] Direct fetch HTTP ${res.status}`);
                     blob = await res.blob();
-                    if (!(await validatePdfMagicBytes(blob))) throw new Error("Not a PDF file");
+                    
+                    const isValid = await validatePdfMagicBytes(blob);
+                    if (!isValid) {
+                        log(`[${pmid}] Direct blob invalid (Size: ${blob.size})`, 'warn');
+                        throw new Error("Not a PDF file");
+                    }
                 } catch (e) {
-                    log(`[${pmid}] Direct fetch failed, switching to Tab mode...`, 'warn');
+                    log(`[${pmid}] Direct fetch failed (${e.message}), switching to Tab mode...`, 'warn');
                     blob = null; // 确保进入 Tab 模式
                 }
             }
 
             // C. Tab 模式 (应对 Publisher DOI / Sci-Hub / 直连失败)
             if (!blob) {
+                log(`[${pmid}] Entering Tab Mode...`);
                 // 依赖浏览器 Cookie 自动跳转
                 blob = await fetchBlobViaTab(result.url);
+                log(`[${pmid}] Tab Mode Result: ${blob ? blob.size + ' bytes' : 'null'}`);
             }
 
             // D. 保存文件
-            if (blob && (await validatePdfMagicBytes(blob))) {
-                const fileHandle = await dirHandle.getFileHandle(`${pmid}.pdf`, { create: true });
-                const writable = await fileHandle.createWritable();
-                await writable.write(blob);
-                await writable.close();
-                
-                log(`[${pmid}] ✅ Saved successfully`, 'success');
-                addResult(pmid);
-                success++;
+            if (blob) {
+                const isValid = await validatePdfMagicBytes(blob);
+                if (isValid) {
+                    const fileHandle = await dirHandle.getFileHandle(`${pmid}.pdf`, { create: true });
+                    const writable = await fileHandle.createWritable();
+                    await writable.write(blob);
+                    await writable.close();
+                    
+                    log(`[${pmid}] ✅ Saved successfully`, 'success');
+                    addResult(pmid);
+                    success++;
+                } else {
+                    log(`[${pmid}] Final Blob Invalid! Size: ${blob.size}`, 'error');
+                    // Inspect first few bytes
+                    if (blob.size > 0) {
+                         const arr = new Uint8Array(await blob.slice(0, 10).arrayBuffer());
+                         const hex = Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join(' ');
+                         log(`[${pmid}] Header Bytes: ${hex}`, 'error');
+                    }
+                    throw new Error(`Failed to get valid PDF content (Invalid Header)`);
+                }
             } else {
-                throw new Error("Failed to get valid PDF content");
+                throw new Error(`Failed to get valid PDF content (Blob is null)`);
             }
 
         } catch (e) {
@@ -112,9 +143,22 @@ async function processBatch(pmids) {
             addError(pmid, 'N/A', e.message);
         }
         
-        // 礼貌延时
-        await new Promise(r => setTimeout(r, 1500));
+        // 礼貌延时 (每个 Worker 处理完一个后休息一下)
+        await new Promise(r => setTimeout(r, 1000));
+    };
+
+    // 启动 Worker (并发处理)
+    const workers = [];
+    for (let i = 0; i < Math.min(pmids.length, CONCURRENCY); i++) {
+        workers.push((async () => {
+            while (queue.length > 0) {
+                const pmid = queue.shift();
+                await processSinglePmid(pmid);
+            }
+        })());
     }
+    
+    await Promise.all(workers);
 
     await chrome.runtime.sendMessage({ action: 'disableSpoofing' });
     log(`🏁 Batch completed. Success: ${success}, Failed: ${fail}`, success > 0 ? 'success' : 'warn');
@@ -268,6 +312,7 @@ function addResult(pmid) {
 // 错误列表 UI
 function addError(pmid, url, reason) {
     failedPmids.push(pmid);
+    failedErrors.push({ pmid, reason });
     const container = document.getElementById('errorArea');
     if (!container) return;
     const div = document.createElement('div');
@@ -298,3 +343,40 @@ async function validatePdfMagicBytes(blob) {
     // %PDF (Hex: 25 50 44 46)
     return arr[0] === 0x25 && arr[1] === 0x50 && arr[2] === 0x44 && arr[3] === 0x46;
 }
+
+// --- 6. 复制按钮逻辑 ---
+
+document.getElementById('copyErrorsBtn').addEventListener('click', () => {
+    if (!failedPmids || failedPmids.length === 0) {
+        alert('No failed PMIDs to copy.');
+        return;
+    }
+    navigator.clipboard.writeText(failedPmids.join('\n')).then(() => {
+        const btn = document.getElementById('copyErrorsBtn');
+        const originalText = btn.innerHTML;
+        btn.innerHTML = '✅ Copied!';
+        setTimeout(() => btn.innerHTML = originalText, 2000);
+    }).catch(err => {
+        console.error('Failed to copy:', err);
+        alert('Failed to copy to clipboard');
+    });
+});
+
+document.getElementById('copyErrorListBtn').addEventListener('click', () => {
+    if (!failedErrors || failedErrors.length === 0) {
+        alert('No error logs to copy.');
+        return;
+    }
+    // Format: PMID - Reason
+    const text = failedErrors.map(e => `${e.pmid} : ${e.reason}`).join('\n');
+    
+    navigator.clipboard.writeText(text).then(() => {
+        const btn = document.getElementById('copyErrorListBtn');
+        const originalText = btn.innerHTML;
+        btn.innerHTML = '✅ Copied!';
+        setTimeout(() => btn.innerHTML = originalText, 2000);
+    }).catch(err => {
+        console.error('Failed to copy:', err);
+        alert('Failed to copy to clipboard');
+    });
+});

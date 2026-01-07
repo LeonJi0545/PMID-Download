@@ -4,7 +4,7 @@ const CONFIG = {
     API_KEY: '3263cf5249bb15d2967832047fd05a82c108',
     ELSEVIER_API_KEY: '3263cf5249bb15d2967832047fd05a82c108',
     TOOL_NAME: 'chrome_extension_downloader',
-    SCHOOL_ID: 265
+    SCHOOL_ID: '265', // Tulane University ID. Set to null or empty string for generic access.
 };
 
 const PmidLogic = {
@@ -39,7 +39,7 @@ const PmidLogic = {
             this.strategyUnpaywall(pmid),   // Unpaywall
             this.strategyEuropePmc(pmid),   // EuropePMC
             this.strategySemanticScholar(pmid), // Semantic Scholar
-            this.strategyElsevier(pmid),    // 【修复】这里必须调用 strategy 包装函数，而不是 getPdfFromElsevier
+            this.strategyElsevier(pmid),
         ];
 
         try {
@@ -145,9 +145,12 @@ const PmidLogic = {
         const validDoi = doi || await this.getDoiFromPmid(pmid);
         if (!validDoi) throw new Error("No DOI for LibKey");
         
-        // LibKey Generic Format
-        const url = `https://libkey.io/libraries/${CONFIG.SCHOOL_ID}/${validDoi}`;
-        // Better: Use the DOI directly if LibKey isn't specific
+        let url;
+        if (CONFIG.SCHOOL_ID) {
+            url = `https://libkey.io/libraries/${CONFIG.SCHOOL_ID}/${validDoi}`;
+        } else {
+            url = `https://libkey.io/${validDoi}`;
+        }
         return { url: url, source: 'LibKey.io', method: 'tab' };
     },
 
@@ -166,7 +169,21 @@ const PmidLogic = {
         }
         // 3. APS
         if (doi.startsWith('10.1103/')) {
-            return `https://journals.aps.org/prl/pdf/${doi}`;
+            const parts = doi.split('/');
+            if (parts.length >= 2) {
+                const suffix = parts[1];
+                let journalCode = '';
+                if (suffix.startsWith('PhysRevLett')) journalCode = 'prl';
+                else if (suffix.startsWith('PhysRevA')) journalCode = 'pra';
+                else if (suffix.startsWith('PhysRevB')) journalCode = 'prb';
+                else if (suffix.startsWith('PhysRevC')) journalCode = 'prc';
+                else if (suffix.startsWith('PhysRevD')) journalCode = 'prd';
+                else if (suffix.startsWith('PhysRevE')) journalCode = 'pre';
+                else if (suffix.startsWith('PhysRevX')) journalCode = 'prx';
+                else if (suffix.startsWith('RevModPhys')) journalCode = 'rmp';
+                
+                if (journalCode) return `https://journals.aps.org/${journalCode}/pdf/${doi}`;
+            }
         }
         return null;
     },
