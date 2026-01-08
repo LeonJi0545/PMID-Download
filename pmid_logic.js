@@ -15,27 +15,40 @@ const PmidLogic = {
         const { enableSciHub = true } = options;
         console.log(`[Logic] Resolving input: ${input}`);
 
-        // --- 0. 特殊处理: Embase PUI (L-Number) ---
-        // 如果输入是 L 开头 (如 L6247690)，直接走 Embase Tab 搜索
+        let pmid = input;
+        let doi = null;
+
+        // --- 0. Pre-processing: Embase PUI (L-Number) ---
         if (/^L\d+$/i.test(input)) {
-            console.log(`[Logic] Detected Embase PUI. Switching to Direct Embase Search.`);
+            console.log(`[Logic] Detected Embase PUI: ${input}`);
             
-            // 直接调用 Embase 策略
-            try {
-                const embaseResult = await this.strategyEmbase(input); // 传入 L 号
-                if (embaseResult) return embaseResult;
-            } catch (e) {
-                console.log(`[Logic] Direct Embase search failed: ${e.message}`);
+            // A. Try API Conversion (PUI -> DOI/PMID)
+            const conversion = await this.convertEmbaseIdToDoi(input);
+            if (conversion) {
+                if (conversion.doi) doi = conversion.doi;
+                if (conversion.pmid) pmid = conversion.pmid;
+                console.log(`[Logic] PUI Converted! DOI: ${doi}, PMID: ${pmid}`);
+                // Proceed to standard flow with new IDs
+            } else {
+                // B. Fallback: Direct Embase Search (Tab Mode)
+                console.log(`[Logic] PUI Conversion failed. Trying Direct Embase Strategy...`);
+                try {
+                    const embaseResult = await this.strategyEmbase(input);
+                    if (embaseResult) return embaseResult;
+                } catch (e) {
+                    console.log(`[Logic] Direct Embase search failed: ${e.message}`);
+                }
+                
+                // C. Fallback: Stripped ID
+                pmid = input.replace(/^L/i, '');
+                console.log(`[Logic] trying stripped ID as fallback: ${pmid}`);
             }
-            
-            // 如果 Embase 搜不到，尝试去掉了 L 之后搜 PubMed (碰运气)
-            const stripped = input.replace(/^L/i, '');
-            console.log(`[Logic] trying stripped ID as fallback: ${stripped}`);
-            input = stripped; // 继续后续流程，当作普通 PMID 试一试
         }
 
-        const pmid = input; 
-        const doi = await this.getDoiFromPmid(pmid);
+        // Standard DOI lookup if not already found
+        if (!doi && /^\d+$/.test(pmid)) {
+             doi = await this.getDoiFromPmid(pmid);
+        }
         
         console.log(`[Logic] Resolving: ${pmid} (DOI: ${doi || 'N/A'})`);
 
