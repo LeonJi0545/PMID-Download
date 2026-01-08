@@ -35,8 +35,8 @@ document.getElementById('startBtn').addEventListener('click', async () => {
     const rawInput = document.getElementById('pmidInput').value.trim();
     if (!rawInput) return alert('Please enter PMIDs!');
     
-    const pmids = rawInput.split(/[\s,]+/).filter(id => /^\d+$/.test(id));
-    if (pmids.length === 0) return alert('No valid PMIDs found!');
+    const pmids = rawInput.split(/[\s,]+/).filter(id => /^(L)?\d+$/i.test(id));
+    if (pmids.length === 0) return alert('No valid IDs found (PMID or Embase L-Number)!');
     
     processBatch(pmids);
 });
@@ -51,6 +51,8 @@ async function processBatch(pmids) {
     
     // 开启 Header 伪装
     await chrome.runtime.sendMessage({ action: 'enableSpoofing' });
+    // Give SW some time to propagate rules
+    await new Promise(r => setTimeout(r, 500));
     
     // 清理界面
     const logContainer = document.getElementById('logArea');
@@ -165,190 +167,211 @@ async function processBatch(pmids) {
     startBtn.disabled = false;
 }
 
-// --- 4. 核心 Tab 嗅探器 (修复版) ---
+// --- 4. 核心 Tab 嗅探器 (最终融合版: Embase 跳转 + Sage/通用增强) ---
 async function fetchBlobViaTab(url) {
     return new Promise((resolve, reject) => {
+        // 后台静默打开标签页
         chrome.tabs.create({ url: url, active: false }, (tab) => {
             if (chrome.runtime.lastError) return reject(chrome.runtime.lastError);
             const tabId = tab.id;
             
-            // 总超时 60s
+            // 超时保护 (60秒)
             const timeout = setTimeout(() => {
                 chrome.tabs.remove(tabId).catch(() => {});
-                reject(new Error("Tab operation timeout (60s)"));
+                reject(new Error("Tab operation timeout"));
             }, 60000);
 
-            // Wait for tab to load
-            chrome.tabs.onUpdated.addListener(function listener(updatedTabId, info) {
-                if (updatedTabId === tabId && info.status === 'complete') {
-                    chrome.tabs.onUpdated.removeListener(listener);
-                    startSniffing(tabId, resolve, reject, timeout);
+            let attempts = 0;
+            // 轮询检查 (每 1.5 秒一次)
+            const interval = setInterval(() => {
+                attempts++;
+                if (attempts > 40) { // 约 60 秒
+                    clearInterval(interval);
+                    return; 
                 }
-            });
+
+                chrome.scripting.executeScript({
+                    target: { tabId: tabId },
+                    func: () => {
+                        // --- 内部注入脚本开始 ---
+                        try {
+                            const host = window.location.hostname;
+                            const href = window.location.href;
+
+                            // ===============================================
+                            // 🟢 1. 全局优先: 直接 PDF 检测
+                            // ===============================================
+                            if (href.match(/\.pdf($|\?|#)/i) || document.contentType === 'application/pdf') {
+                                return { status: 'FOUND', url: href };
+                            }
+                            const embed1 = document.querySelector('embed[type="application/pdf"], object[type="application/pdf"]');
+                            if (embed1 && embed1.src) {
+                                return { status: 'FOUND', url: embed1.src };
+                            }
+
+
+                            // ===============================================
+                            // 🟢 2. Embase 专用跳转逻辑 (优先级高于通用嗅探)
+                            // ===============================================
+                            // 如果还在 Embase，必须先跳出去，否则不可能找到 PDF
+                            if (host.includes('embase.com')) {
+                                // 寻找 "Full Text" 或 "View at Publisher" 按钮
+                                const fullTextBtn = Array.from(document.querySelectorAll('a, button, span')).find(el => {
+                                    const txt = (el.textContent || "").toLowerCase().trim();
+                                    const title = (el.title || "").toLowerCase();
+                                    
+                                    // 匹配 Embase 的特定按钮文本
+                                    const isMatch = (txt === 'full text' || 
+                                                     txt === 'publisher full text' || 
+                                                     txt.includes('view at publisher') ||
+                                                     title.includes('full text'));
+                                    
+                                    // 必须是可见的
+                                    return isMatch && el.offsetParent !== null;
+                                });
+
+                                if (fullTextBtn) {
+                                    // 获取真正的链接元素 (如果是 span 包在 a 里)
+                                    const link = fullTextBtn.tagName === 'A' ? fullTextBtn : fullTextBtn.closest('a');
+                                    
+                                    if (link && link.href) {
+                                        // 关键: 强制在当前 Tab 跳转，保持 TabID 不变
+                                        if (!window.location.href.includes(link.href)) {
+                                            window.location.href = link.href;
+                                            return { status: 'WAITING', msg: 'Embase: Jumping to Publisher...' };
+                                        }
+                                    }
+                                }
+                                // 如果没找到按钮，说明页面还没加载完，继续 WAITING
+                                return { status: 'WAITING', msg: 'Embase: Looking for Full Text button...' };
+                            }
+
+
+                            // ===============================================
+                            // 🔵 策略 B: 通用 PDF 嗅探 (适用于出版商页面 / Anna's Archive / 直接 PDF)
+                            // ===============================================
+                            
+                            // 1. 如果当前 URL 已经是 PDF
+                            if (href.match(/\.pdf($|\?|#)/i) || document.contentType === 'application/pdf') {
+                                return { status: 'FOUND', url: href };
+                            }
+                            
+                            // 2. 检查嵌入的 PDF (Embed/Object/Iframe)
+                            const embed = document.querySelector('embed[type="application/pdf"], object[type="application/pdf"]');
+                            if (embed && embed.src) return { status: 'FOUND', url: embed.src };
+
+                            // 3. 检查 Sage 期刊等特殊结构
+                            const sageStyleLink = document.querySelector('a[data-item-name="download-pdf-url"]');
+                            if (sageStyleLink) return { status: 'FOUND', url: sageStyleLink.href };
+
+                            // C. 暴力搜索 "Download PDF" 按钮
+                            const links = Array.from(document.querySelectorAll('a, button'));
+                            const pdfLink = links.find(el => {
+                                const h = (el.href || "").toLowerCase();
+                                const txt = (el.textContent || el.innerText || "").trim().toLowerCase();
+                                const title = (el.title || "").toLowerCase();
+                                const ariaLabel = (el.getAttribute('aria-label') || "").toLowerCase();
+
+                                if (!h || h === '#' || h.startsWith('javascript')) return false;
+
+                                // 扩展名匹配
+                                if (h.includes('.pdf')) return true;
+
+                                // 关键词匹配
+                                const isPdfText = txt === 'pdf' || 
+                                                  txt === 'download pdf' || 
+                                                  txt === 'download article' || 
+                                                  txt.includes('full text pdf') ||
+                                                  title.includes('download pdf') ||
+                                                  title.includes('download article') ||
+                                                  ariaLabel.includes('pdf');
+                                
+                                // Anna's Archive 特例
+                                const isAnna = host.includes('annas-archive') && (txt.includes('slow partner') || txt.includes('libgen'));
+
+                                return isPdfText || isAnna;
+                            });
+
+                            if (pdfLink) return { status: 'FOUND', url: pdfLink.href };
+
+                            // 验证码检测
+                            if (document.title.includes('Cloudflare') || document.title.includes('Verify')) {
+                                return { status: 'CAPTCHA' };
+                            }
+
+                            return { status: 'WAITING' };
+
+                        } catch (e) {
+                            return { status: 'ERROR', msg: e.message };
+                        }
+                        // --- 内部注入脚本结束 ---
+                    }
+                }, (results) => {
+                    if (chrome.runtime.lastError) return;
+                    if (!results || !results[0] || !results[0].result) return;
+                    
+                    const res = results[0].result;
+                    if (res.msg) console.log(res.msg);
+
+                    if (res.status === 'CAPTCHA') {
+                        chrome.tabs.update(tabId, { active: true }).catch(() => {});
+                    } 
+                    else if (res.status === 'FOUND') {
+                        clearInterval(interval);
+                        clearTimeout(timeout);
+                        console.log(`[Sniffer] PDF Link Found: ${res.url}`);
+
+                        // 在 Tab 上下文中下载
+                        chrome.scripting.executeScript({
+                            target: { tabId: tabId },
+                            func: async (u) => {
+                                try {
+                                    const r = await fetch(u);
+                                    
+                                    // 宽松检查：只要不是明确的 HTML 页面，且状态码 200，就尝试作为 Blob 读取
+                                    // 因为有些 PDF 链接可能 Content-Type 不规范，或者 fetch 时 header 被修改
+                                    const type = (r.headers.get('Content-Type') || '').toLowerCase();
+                                    if (!r.ok) return { success: false, error: `HTTP ${r.status}` };
+                                    if (type.includes('text/html')) return { success: false, error: 'Received HTML instead of PDF' };
+
+                                    const b = await r.blob();
+                                    // 简单的长度检查，防止下载到空文件或错误页
+                                    if (b.size < 1000) return { success: false, error: `Blob too small (${b.size} bytes)` };
+
+                                    return new Promise(rs => {
+                                        const reader = new FileReader();
+                                        reader.onload = () => rs({success:true, data:reader.result});
+                                        reader.readAsDataURL(b);
+                                    });
+                                } catch(e) { return { success: false, error: e.message }; }
+                            },
+                            args: [res.url]
+                        }, (data) => {
+                            chrome.tabs.remove(tabId).catch(() => {});
+                            if (data && data[0] && data[0].result && data[0].result.success) {
+                                fetch(data[0].result.data).then(r=>r.blob()).then(b=>resolve(b));
+                            } else {
+                                // 如果 Tab 内下载失败，尝试将链接传回主线程再试一次 (兜底)
+                                // 这种情况常发生在 Tab 内 fetch 受到严格 CSP 限制时
+                                if (res.url && res.url.startsWith('http')) {
+                                     console.warn("Tab internal fetch failed, trying main thread fetch fallback...");
+                                     fetch(res.url).then(r => {
+                                         if (!r.ok) throw new Error("Main thread fallback failed");
+                                         return r.blob();
+                                     }).then(b => resolve(b)).catch(e => reject(new Error("Failed to fetch data inside Tab and Main Thread: " + (data?.[0]?.result?.error || e.message))));
+                                } else {
+                                     reject(new Error("Failed to fetch data inside Tab: " + (data?.[0]?.result?.error || "Unknown")));
+                                }
+                            }
+                        });
+                    }
+                });
+            }, 1500); // 1.5秒轮询
         });
     });
 }
-
 function startSniffing(tabId, resolve, reject, timeout) {
-    let attempts = 0;
-    const interval = setInterval(() => {
-        attempts++;
-        if (attempts > 30) { // 30次 * 2秒 = 60秒
-            clearInterval(interval);
-            // Don't reject here, let the main timeout handle it or resolve with null
-            // reject(new Error("Sniffing timeout")); 
-            return; 
-        }
-
-        chrome.scripting.executeScript({
-            target: { tabId: tabId },
-            func: () => {
-                try {
-                    // 0. 暴力移除页面上的 CSP Meta 标签
-                    const metas = document.querySelectorAll('meta[http-equiv="Content-Security-Policy"]');
-                    metas.forEach(m => m.remove());
-
-                    // 1. 检查当前 URL 是否是 PDF
-                    if (window.location.href.match(/\.pdf($|\?)/i) || document.contentType === 'application/pdf') {
-                        return { status: 'FOUND', url: window.location.href };
-                    }
-                    // 2. 检查 Chrome 内置 Viewer
-                    if (document.querySelector('embed[type="application/pdf"]')) {
-                        return { status: 'FOUND', url: document.querySelector('embed').src };
-                    }
-                    // 3. 检查常见学术 Meta 标签
-                    const metaPdf = document.querySelector('meta[name="citation_pdf_url"]');
-                    if (metaPdf && metaPdf.content) return { status: 'FOUND', url: metaPdf.content };
-                    
-                    // 4. 暴力搜索 "Download PDF" 按钮
-                    const links = Array.from(document.querySelectorAll('a'));
-                    const pdfLink = links.find(a => {
-                        const txt = a.textContent.toLowerCase();
-                        const href = a.href.toLowerCase();
-                        if (href.startsWith('javascript') || href === '#' || !href) return false;
-                        return (txt.includes('download') && txt.includes('pdf')) ||
-                               (txt.includes('view') && txt.includes('pdf')) ||
-                               (a.title && a.title.toLowerCase().includes('download pdf'));
-                    });
-                    if (pdfLink) return { status: 'FOUND', url: pdfLink.href };
-
-                    // 5. Sci-Hub 特殊处理
-                    if (window.location.hostname.includes('sci-hub')) {
-                        const embed = document.querySelector('embed');
-                        if (embed && embed.src) return { status: 'FOUND', url: embed.src };
-                    }
-
-                    // 6. 验证码检测
-                    if (document.title.includes('Cloudflare') || document.title.includes('Verify')) {
-                        return { status: 'CAPTCHA' };
-                    }
-                    
-                    // 7. 尝试点击 "Full Text" 或 "PDF" 按钮 (模拟点击)
-                    const potentialButtons = Array.from(document.querySelectorAll('button, a, span, div'));
-                    const fullTextBtn = potentialButtons.find(el => {
-                        const txt = el.textContent ? el.textContent.toLowerCase() : '';
-                        if (!txt) return false;
-                        return (txt.includes('full text') || txt.includes('fulltext') || (txt.includes('pdf') && txt.includes('download')));
-                    });
-
-                    // 避免重复点击 (可以通过标记属性)
-                    if (fullTextBtn && !fullTextBtn.dataset.clicked) {
-                        fullTextBtn.dataset.clicked = 'true';
-                        fullTextBtn.click();
-                        // 点击后需要等待页面变化，所以返回 WAITING
-                        return { status: 'WAITING', msg: 'Clicked Full Text button' };
-                    }
-
-                    // 8. Embase 特殊处理
-                    if (window.location.hostname.includes('embase.com')) {
-                        // A. 检测 Loading Error (404)
-                        const errorMsg = document.body.innerText;
-                        if (errorMsg.includes('Loading error') && errorMsg.includes('404')) {
-                             return { status: 'ERROR', msg: 'Embase: Record not found (404)' };
-                        }
-
-                        // B. 尝试导出 PDF 流程
-                        // Step 1: 点击 "Export" 按钮
-                        const exportBtn = document.querySelector('button[data-testid="export-record"]');
-                        if (exportBtn && !exportBtn.dataset.clicked) {
-                            exportBtn.dataset.clicked = 'true';
-                            exportBtn.click();
-                            return { status: 'WAITING', msg: 'Embase: Clicked Export' };
-                        }
-
-                        // Step 2: 在弹窗中选择 "PDF" 格式
-                        const formatSelect = document.getElementById('export-format');
-                        if (formatSelect && formatSelect.value !== 'PDF') {
-                            formatSelect.value = 'PDF';
-                            // 触发 change 事件以确保生效
-                            formatSelect.dispatchEvent(new Event('change', { bubbles: true }));
-                            return { status: 'WAITING', msg: 'Embase: Selected PDF format' };
-                        }
-
-                        // Step 3: 点击 "Export" 确认按钮
-                        const submitBtn = document.querySelector('button[data-testid="export-submit"]');
-                        if (submitBtn && !submitBtn.dataset.clicked) {
-                             // 只有在已经选择了 PDF 的情况下才点击
-                             if (formatSelect && formatSelect.value === 'PDF') {
-                                submitBtn.dataset.clicked = 'true';
-                                submitBtn.click();
-                                return { status: 'WAITING', msg: 'Embase: Submitted Export' };
-                             }
-                        }
-                    }
-
-                    return { status: 'WAITING' };
-                } catch (e) {
-                    return { status: 'ERROR', msg: e.message };
-                }
-            }
-        }, (results) => {
-            // Handle potential injection errors (e.g. tab closed, error page)
-            if (chrome.runtime.lastError) {
-                // console.warn("Injection failed:", chrome.runtime.lastError.message);
-                return;
-            }
-
-            if (!results || !results[0]) return;
-            const res = results[0].result;
-            if (!res) return; // Safety check
-
-            if (res.status === 'CAPTCHA') {
-                chrome.tabs.update(tabId, { active: true }).catch(() => {}); // 遇到验证码弹窗，忽略可能的错误
-            } 
-            else if (res.status === 'FOUND') {
-                clearInterval(interval);
-                clearTimeout(timeout);
-                
-                // 在 Tab 上下文中下载数据 (继承 Cookie)
-                chrome.scripting.executeScript({
-                    target: { tabId: tabId },
-                    func: async (u) => {
-                        try {
-                            const r = await fetch(u);
-                            if(!r.ok) return null;
-                            const b = await r.blob();
-                            return new Promise(rs => {
-                                const reader = new FileReader();
-                                reader.onload = () => rs({success:true, data:reader.result});
-                                reader.readAsDataURL(b);
-                            });
-                        } catch(e) { return null; }
-                    },
-                    args: [res.url]
-                }, (data) => {
-                    // Debug Mode: Do NOT close tab
-                    // chrome.tabs.remove(tabId).catch(() => {});
-                    
-                    if (data && data[0] && data[0].result && data[0].result.success) {
-                        fetch(data[0].result.data).then(r=>r.blob()).then(b=>resolve(b));
-                    } else {
-                        reject(new Error("Failed to fetch data inside Tab"));
-                    }
-                });
-            }
-        });
-    }, 2000); // 每2秒轮询
+    // Legacy function placeholder
 }
 
 // --- 5. 缺失的辅助函数 (已补全) ---

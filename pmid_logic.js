@@ -2,7 +2,7 @@
 const CONFIG = {
     EMAIL: 'xwang70@tulane.edu',
     API_KEY: '3263cf5249bb15d2967832047fd05a82c108',
-    ELSEVIER_API_KEY: '3263cf5249bb15d2967832047fd05a82c108',
+    ELSEVIER_API_KEY: 'cdf864d5b1213b871dde1b241d79a355',
     TOOL_NAME: 'chrome_extension_downloader',
     SCHOOL_ID: '265', // Tulane University ID. Set to null or empty string for generic access.
 };
@@ -11,11 +11,33 @@ const PmidLogic = {
     /**
      * Main Entry Point: Resolve PDF URL using Parallel Strategies
      */
-    async resolvePdfUrl(pmid, options = {}) {
+    async resolvePdfUrl(input, options = {}) {
         const { enableSciHub = true } = options;
-        console.log(`[Logic] Resolving PMID: ${pmid} (Sci-Hub Enabled: ${enableSciHub})`);
-        
+        console.log(`[Logic] Resolving input: ${input}`);
+
+        // --- 0. 特殊处理: Embase PUI (L-Number) ---
+        // 如果输入是 L 开头 (如 L6247690)，直接走 Embase Tab 搜索
+        if (/^L\d+$/i.test(input)) {
+            console.log(`[Logic] Detected Embase PUI. Switching to Direct Embase Search.`);
+            
+            // 直接调用 Embase 策略
+            try {
+                const embaseResult = await this.strategyEmbase(input); // 传入 L 号
+                if (embaseResult) return embaseResult;
+            } catch (e) {
+                console.log(`[Logic] Direct Embase search failed: ${e.message}`);
+            }
+            
+            // 如果 Embase 搜不到，尝试去掉了 L 之后搜 PubMed (碰运气)
+            const stripped = input.replace(/^L/i, '');
+            console.log(`[Logic] trying stripped ID as fallback: ${stripped}`);
+            input = stripped; // 继续后续流程，当作普通 PMID 试一试
+        }
+
+        const pmid = input; 
         const doi = await this.getDoiFromPmid(pmid);
+        
+        console.log(`[Logic] Resolving: ${pmid} (DOI: ${doi || 'N/A'})`);
 
         // --- 1. Priority: URL Pattern Prediction (Speed Boost) ---
         // If we can guess the direct PDF URL from the DOI, try it first.
@@ -39,22 +61,43 @@ const PmidLogic = {
             this.strategyUnpaywall(pmid),   // Unpaywall
             this.strategyEuropePmc(pmid),   // EuropePMC
             this.strategySemanticScholar(pmid), // Semantic Scholar
-            this.strategyElsevier(pmid),
         ];
 
+        // 3.8 Anna's Archive (Moved to parallel group for speed)
+        // Since Anna's scraper can be relatively fast with direct links, we can include it here or just after.
+        // However, since it involves more complex scraping, maybe keep it separate if APIs fail.
+        
+        // --- Execution Order Refinement ---
+        
+        // Batch 1: Fast & Direct APIs (High Confidence, Low Cost)
         try {
-            // Promise.any returns the first successfully resolved promise
             const result = await Promise.any(apiPromises);
             if (result) {
-                console.log(`[Logic] Winner: ${result.source}`);
+                console.log(`[Logic] Winner (Batch 1): ${result.source}`);
                 return result;
             }
         } catch (e) {
-            console.log(`[Logic] All API strategies failed for ${pmid}. Trying Fallback...`);
+            console.log(`[Logic] Batch 1 (APIs) failed for ${pmid}. Trying Fallback...`);
         }
 
-        // --- 2.5 Embase Strategy (Before LibKey) ---
+        // Batch 2: Interactive / Complex Strategies (Tab Manipulation / Scraping)
+        
+        // 2.0 Elsevier API Strategy (Moved to Batch 2 start as requested)
         try {
+            console.log(`[Logic] Trying Elsevier API strategy for ${pmid}...`);
+            const elsevierResult = await this.strategyElsevier(pmid);
+            if (elsevierResult) {
+                console.log(`[Logic] Found via Elsevier API: ${elsevierResult.url}`);
+                return elsevierResult;
+            }
+        } catch (e) {
+            console.log(`[Logic] Elsevier API strategy failed: ${e.message}`);
+        }
+
+        // 2.1 Embase Strategy (Explicit Check)
+        try {
+            // Only try Embase if it looks like we might find it there or if previous failed
+            // But since we have specific L-number handling at start, this is for PMIDs that are in Embase
             console.log(`[Logic] Trying Embase strategy for ${pmid}...`);
             const embaseResult = await this.strategyEmbase(pmid);
             if (embaseResult) {
@@ -65,10 +108,10 @@ const PmidLogic = {
             console.log(`[Logic] Embase strategy failed: ${e.message}`);
         }
 
-        // --- 3. LibKey.io Strategy (Secondary Fallback) ---
+        // 2.2 LibKey.io Strategy
         try {
             console.log(`[Logic] Trying LibKey.io fallback for ${pmid}...`);
-            const libKeyResult = await this.strategyLibKey(pmid, doi); // Pass DOI if available
+            const libKeyResult = await this.strategyLibKey(pmid, doi); 
             if (libKeyResult) {
                 console.log(`[Logic] Found via LibKey.io: ${libKeyResult.url}`);
                 return libKeyResult;
@@ -77,10 +120,9 @@ const PmidLogic = {
             console.log(`[Logic] LibKey.io strategy failed: ${e.message}`);
         }
 
-        // --- 3.8 Anna's Archive Scraper (集成版) ---
+        // 2.3 Anna's Archive Scraper (Advanced)
         try {
             console.log(`[Logic] Trying Anna's Archive Scraper for ${pmid}...`);
-            // 传入 DOI 和 PMID，优先用 DOI 搜
             const annasResult = await this.strategyAnnasArchiveScraper(pmid, doi); 
             if (annasResult) {
                 console.log(`[Logic] Found via Anna's Archive Scraper: ${annasResult.url}`);
@@ -90,7 +132,7 @@ const PmidLogic = {
             console.log(`[Logic] Anna's scraper failed: ${e.message}`);
         }
 
-        // --- 4. Sci-Hub (The "Nuclear Option" - Last Resort) ---
+        // --- 3. Sci-Hub (The "Nuclear Option" - Last Resort) ---
         if (enableSciHub) {
             try {
                 console.log(`[Logic] Trying Sci-Hub as last resort for ${pmid}...`);
@@ -114,6 +156,53 @@ const PmidLogic = {
         }
 
         return null;
+    },
+
+    async convertEmbaseIdToDoi(lNumber) {
+        // 1. 去掉 "L" 前缀，获取纯数字 PUI 
+        const pui = lNumber.replace(/^L/i, ''); 
+        if (!/^\d+$/.test(pui)) return null; // 如果去掉 L 后不是纯数字，则放弃 
+
+        console.log(`[Logic] Detected Embase PUI: ${pui}, attempting conversion via Scopus API...`); 
+
+        const apiKey = CONFIG.ELSEVIER_API_KEY; 
+        if (!apiKey) { 
+            console.warn("[Logic] No Elsevier API Key provided, cannot convert Embase ID."); 
+            return null; 
+        } 
+
+        // 2. 使用 Scopus Search API 查询 PUI 
+        // 注意：搜索语法通常支持 PUI(xxx) 或者直接搜数字 
+        const apiUrl = `https://api.elsevier.com/content/search/scopus?query=PUI(${pui})&apiKey=${apiKey}&httpAccept=application/json`; 
+
+        try { 
+            const response = await fetch(apiUrl); 
+            if (!response.ok) throw new Error(`Scopus API error: ${response.status}`); 
+            
+            const data = await response.json(); 
+            const entries = data['search-results']?.entry; 
+
+            if (entries && entries.length > 0) { 
+                const entry = entries[0]; 
+                
+                // 3. 提取 DOI 或 PMID 
+                const doi = entry['prism:doi']; 
+                const pmid = entry['pubmed-id']; 
+
+                if (doi) { 
+                    console.log(`[Logic] Converted Embase ${lNumber} -> DOI: ${doi}`); 
+                    return { doi: doi, pmid: pmid }; 
+                } 
+                if (pmid) { 
+                    console.log(`[Logic] Converted Embase ${lNumber} -> PMID: ${pmid}`); 
+                    return { doi: null, pmid: pmid }; 
+                } 
+            } 
+        } catch (e) { 
+            console.warn(`[Logic] Embase PUI conversion failed: ${e.message}`); 
+        } 
+        
+        return null; 
     },
 
     // --- WRAPPERS for Promise.any ---
@@ -165,20 +254,34 @@ const PmidLogic = {
         throw new Error("Sci-Hub failed");
     },
 
-    async strategyEmbase(pmid) {
+    async strategyEmbase(id) {
         // Embase search usually requires more complex interaction or API access.
         // Assuming a direct search URL pattern for demonstration or if it redirects to full text.
         // Since Embase is a subscription database, this might be a "Tab" strategy to let user login/access via IP.
         
-        // Construct a search URL for Embase
-        // Note: Embase doesn't have a simple public "get PDF" API like Unpaywall. 
-        // We will try to open a search result page which might lead to the PDF.
-        const searchUrl = `https://www.embase.com/records?subaction=viewrecord&id=L${pmid}`; 
-        
-        // However, a better approach for "Tab Mode" might be checking if we can find a direct link via DOI on a partner site if Embase redirects there.
-        // For now, let's treat it as a Tab-based discovery attempt.
-        
-        return { url: searchUrl, source: 'Embase', method: 'tab' };
+        let url;
+        // 如果是 L 开头的 PUI，使用直接记录访问 URL
+        if (/^L\d+$/i.test(id)) {
+             // 格式: https://www.embase.com/records?subaction=viewrecord&id=L6247690
+             url = `https://www.embase.com/records?subaction=viewrecord&id=${id}`;
+        } else {
+            // 如果是 PMID 或 DOI，使用高级搜索直接定位 (避免 quickSearch 的歧义页面)
+            // 使用 PUI 搜索语法: PUI(L...) 或者 PMID(...) 或者 DOI(...)
+            // 但最稳妥的还是 quickSearch，只是我们需要让它更精确
+            // 尝试使用 records 视图的搜索参数
+            url = `https://www.embase.com/records?subaction=viewrecord&id=${id}`; 
+            // 注意: 这里假设如果传入的是非 L 号，Embase 也能通过某种方式识别，或者我们应该回退到 search
+            // 如果不是 L 号，还是用 search 比较稳妥
+            if (!id.toString().startsWith('L')) {
+                 url = `https://www.embase.com/#quickSearch/default?search=${encodeURIComponent(id)}`;
+            }
+        }
+
+        return { 
+            url: url, 
+            source: 'Embase (Direct)', 
+            method: 'tab' // 必须用 Tab 模式，依赖用户登录
+        };
     },
 
     // --- 新增：Anna's Archive 爬虫策略 (移植自 annas-archive-api) ---
@@ -366,6 +469,56 @@ const PmidLogic = {
             if (data.primary_location && data.primary_location.pdf_url) return data.primary_location.pdf_url;
             return null;
         } catch (e) { return null; }
+    },
+
+    async getPdfFromElsevier(pmid) {
+        if (!CONFIG.ELSEVIER_API_KEY) return null;
+        
+        try {
+            // 使用用户提供的 API Key 和 Headers 进行请求
+            // X-ELS-APIKey: ...
+            // Accept: application/json
+            // 查询 article 接口获取 link
+            const metaUrl = `https://api.elsevier.com/content/article/pubmed_id/${pmid}`;
+            const response = await fetch(metaUrl, {
+                method: 'GET',
+                headers: {
+                    'X-ELS-APIKey': CONFIG.ELSEVIER_API_KEY,
+                    'Accept': 'application/json'
+                }
+            });
+
+            if (!response.ok) {
+                console.warn(`Elsevier API error: ${response.status}`);
+                return null;
+            }
+            
+            const data = await response.json();
+            const links = data['full-text-retrieval-response']?.['coredata']?.['link'];
+            
+            if (links) {
+                // 优先寻找 scidir 链接 (ScienceDirect 页面)，因为直接 PDF 链接通常需要更复杂的认证
+                // 或者寻找 'self' 且 type 为 application/pdf 的链接
+                const pdfLink = links.find(l => l['@rel'] === 'scidir'); 
+                
+                if (pdfLink) {
+                    // ScienceDirect 页面链接，通常可以跳转后下载
+                    return pdfLink['@href'];
+                }
+                
+                // 如果没有 scidir，尝试找 pdf
+                const directPdf = links.find(l => l['@type'] === 'application/pdf');
+                if (directPdf) {
+                    // 如果直接返回 PDF 链接，我们需要确保带上 API Key 或者 headers
+                    // 但通常这个链接是受保护的，可能需要 Tab 模式打开
+                    // 我们可以返回它，让 Dashboard 尝试
+                    return directPdf['@href'];
+                }
+            }
+        } catch (e) {
+            console.warn("Elsevier API check failed", e);
+        }
+        return null;
     },
 
     async getPdfFromSemanticScholar(pmid) {

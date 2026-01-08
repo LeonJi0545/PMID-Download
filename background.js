@@ -52,6 +52,8 @@ async function applySpoofingRules() {
                     "responseHeaders": [
                         { "header": "Content-Security-Policy", "operation": "remove" },
                         { "header": "Content-Security-Policy-Report-Only", "operation": "remove" },
+                        { "header": "X-Content-Security-Policy", "operation": "remove" },
+                        { "header": "X-WebKit-CSP", "operation": "remove" },
                         { "header": "X-Frame-Options", "operation": "remove" } // Also allow framing if needed
                     ]
                 },
