@@ -9,39 +9,47 @@ const CONFIG = {
 
 const PmidLogic = {
     /**
-     * Main Entry Point: Resolve PDF URL using Parallel Strategies
+     * Main Entry Point: Resolve PDF URL using Multi-Stage Strategies with Validation
+     * Now accepts a validateStrategy callback to ensure we don't stop at a bad URL.
      */
     async resolvePdfUrl(input, options = {}) {
-        const { enableSciHub = true } = options;
+        const { enableSciHub = true, validateStrategy = async () => true } = options;
         console.log(`[Logic] Resolving input: ${input}`);
 
         let pmid = input;
         let doi = null;
+        const isEmbasePui = /^L\d+$/i.test(input);
 
-        // --- 0. Pre-processing: Embase PUI (L-Number) ---
-        if (/^L\d+$/i.test(input)) {
-            console.log(`[Logic] Detected Embase PUI: ${input}`);
-            
+        // --- 0. Priority: Direct Embase Strategy for L-Numbers ---
+        // User Request: If input starts with "L", execute Embase strategy immediately.
+        if (isEmbasePui) {
+            console.log(`[Logic] Embase PUI (L-Number) detected: ${input}. Executing Embase Strategy immediately...`);
+            try {
+                const res = await this.strategyEmbase(input);
+                if (res) {
+                    console.log(`[Logic] Testing candidate from Embase (Direct): ${res.url}`);
+                    // If validateStrategy returns true, we are done.
+                    if (await validateStrategy(res)) {
+                        console.log(`[Logic] Winner: Embase (Direct)`);
+                        return res;
+                    }
+                }
+            } catch (e) {
+                console.warn(`[Logic] Direct Embase strategy failed: ${e.message}, falling back to conversion/search.`);
+            }
+        }
+
+        // --- 1. Pre-processing: Embase PUI (L-Number) Conversion (Fallback) ---
+        if (isEmbasePui) {
+            console.log(`[Logic] Direct Embase failed or not sufficient. Attempting conversion...`);
             // A. Try API Conversion (PUI -> DOI/PMID)
             const conversion = await this.convertEmbaseIdToDoi(input);
             if (conversion) {
                 if (conversion.doi) doi = conversion.doi;
                 if (conversion.pmid) pmid = conversion.pmid;
                 console.log(`[Logic] PUI Converted! DOI: ${doi}, PMID: ${pmid}`);
-                // Proceed to standard flow with new IDs
             } else {
-                // B. Fallback: Direct Embase Search (Tab Mode)
-                console.log(`[Logic] PUI Conversion failed. Trying Direct Embase Strategy...`);
-                try {
-                    const embaseResult = await this.strategyEmbase(input);
-                    if (embaseResult) return embaseResult;
-                } catch (e) {
-                    console.log(`[Logic] Direct Embase search failed: ${e.message}`);
-                }
-                
-                // C. Fallback: Stripped ID
-                pmid = input.replace(/^L/i, '');
-                console.log(`[Logic] trying stripped ID as fallback: ${pmid}`);
+                console.log(`[Logic] PUI Conversion failed. Will rely on Direct Embase strategy in Batch 2.`);
             }
         }
 
@@ -53,121 +61,102 @@ const PmidLogic = {
         console.log(`[Logic] Resolving: ${pmid} (DOI: ${doi || 'N/A'})`);
 
         // --- 1. Priority: URL Pattern Prediction (Speed Boost) ---
-        // If we can guess the direct PDF URL from the DOI, try it first.
         if (doi) {
             const predictedUrl = await this.predictPublisherUrl(doi);
             if (predictedUrl) {
-                // Verify with HEAD request
                 const isAccessible = await this.checkUrlAccessibility(predictedUrl);
                 if (isAccessible) {
-                    console.log(`[Logic] URL Prediction success: ${predictedUrl}`);
-                    return { url: predictedUrl, source: 'Pattern Prediction', method: 'direct' };
+                    const res = { url: predictedUrl, source: 'Pattern Prediction', method: 'direct' };
+                    console.log(`[Logic] Testing Pattern Prediction...`);
+                    if (await validateStrategy(res)) return res;
                 }
             }
         }
 
-        // --- 2. Fast API Group (Parallel Execution) ---
-        // We fire all fast APIs at once and take the first valid PDF URL.
-        const apiPromises = [
-            this.strategyNcbiOa(pmid),      // NCBI OA API
-            this.strategyOpenAlex(pmid),    // OpenAlex
-            this.strategyUnpaywall(pmid),   // Unpaywall
-            this.strategyEuropePmc(pmid),   // EuropePMC
-            this.strategySemanticScholar(pmid), // Semantic Scholar
+        // --- Serial Strategy Execution ---
+        // User Request: "Fast Batch" (Parallel) -> "Slow Batch" (Serial)
+        
+        // 1. Fast Batch (Parallel APIs)
+        console.log(`[Logic] Starting Fast Batch (Parallel)...`);
+        const fastStrategies = [
+            { name: 'NCBI OA', fn: () => this.strategyNcbiOa(pmid) },
+            { name: 'Elsevier API', fn: () => this.strategyElsevier(pmid) },
+            { name: 'OpenAlex', fn: () => this.strategyOpenAlex(pmid) },
+            { name: 'Unpaywall', fn: () => this.strategyUnpaywall(pmid) },
+            { name: 'EuropePMC', fn: () => this.strategyEuropePmc(pmid) },
+            { name: 'Semantic Scholar', fn: () => this.strategySemanticScholar(pmid) },
+            { name: 'XsCntpj', fn: () => this.strategyXsCntpj(pmid, doi) },
         ];
 
-        // 3.8 Anna's Archive (Moved to parallel group for speed)
-        // Since Anna's scraper can be relatively fast with direct links, we can include it here or just after.
-        // However, since it involves more complex scraping, maybe keep it separate if APIs fail.
-        
-        // --- Execution Order Refinement ---
-        
-        // Batch 1: Fast & Direct APIs (High Confidence, Low Cost)
-        try {
-            const result = await Promise.any(apiPromises);
-            if (result) {
-                console.log(`[Logic] Winner (Batch 1): ${result.source}`);
-                return result;
-            }
-        } catch (e) {
-            console.log(`[Logic] Batch 1 (APIs) failed for ${pmid}. Trying Fallback...`);
-        }
-
-        // Batch 2: Interactive / Complex Strategies (Tab Manipulation / Scraping)
-        
-        // 2.0 Elsevier API Strategy (Moved to Batch 2 start as requested)
-        try {
-            console.log(`[Logic] Trying Elsevier API strategy for ${pmid}...`);
-            const elsevierResult = await this.strategyElsevier(pmid);
-            if (elsevierResult) {
-                console.log(`[Logic] Found via Elsevier API: ${elsevierResult.url}`);
-                return elsevierResult;
-            }
-        } catch (e) {
-            console.log(`[Logic] Elsevier API strategy failed: ${e.message}`);
-        }
-
-        // 2.1 Embase Strategy (Explicit Check)
-        try {
-            // Only try Embase if it looks like we might find it there or if previous failed
-            // But since we have specific L-number handling at start, this is for PMIDs that are in Embase
-            console.log(`[Logic] Trying Embase strategy for ${pmid}...`);
-            const embaseResult = await this.strategyEmbase(pmid);
-            if (embaseResult) {
-                console.log(`[Logic] Found via Embase: ${embaseResult.url}`);
-                return embaseResult;
-            }
-        } catch (e) {
-            console.log(`[Logic] Embase strategy failed: ${e.message}`);
-        }
-
-        // 2.2 LibKey.io Strategy
-        try {
-            console.log(`[Logic] Trying LibKey.io fallback for ${pmid}...`);
-            const libKeyResult = await this.strategyLibKey(pmid, doi); 
-            if (libKeyResult) {
-                console.log(`[Logic] Found via LibKey.io: ${libKeyResult.url}`);
-                return libKeyResult;
-            }
-        } catch (e) {
-            console.log(`[Logic] LibKey.io strategy failed: ${e.message}`);
-        }
-
-        // 2.3 Anna's Archive Scraper (Advanced)
-        try {
-            console.log(`[Logic] Trying Anna's Archive Scraper for ${pmid}...`);
-            const annasResult = await this.strategyAnnasArchiveScraper(pmid, doi); 
-            if (annasResult) {
-                console.log(`[Logic] Found via Anna's Archive Scraper: ${annasResult.url}`);
-                return annasResult;
-            }
-        } catch (e) {
-            console.log(`[Logic] Anna's scraper failed: ${e.message}`);
-        }
-
-        // --- 3. Sci-Hub (The "Nuclear Option" - Last Resort) ---
-        if (enableSciHub) {
+        // Execute all fast strategies in parallel
+        const fastPromises = fastStrategies.map(async (s) => {
             try {
-                console.log(`[Logic] Trying Sci-Hub as last resort for ${pmid}...`);
-                const sciHubResult = await this.strategySciHub(pmid);
-                if (sciHubResult) {
-                    console.log(`[Logic] Found via Sci-Hub: ${sciHubResult.url}`);
-                    return sciHubResult;
+                const res = await s.fn();
+                return { ...res, strategyName: s.name };
+            } catch (e) {
+                return null;
+            }
+        });
+
+        const fastResults = (await Promise.all(fastPromises)).filter(r => r !== null);
+        
+        // Try to validate candidates (First come, first served, or could prioritize)
+        if (fastResults.length > 0) {
+            console.log(`[Logic] Fast Batch found ${fastResults.length} candidates.`);
+            for (const res of fastResults) {
+                console.log(`[Logic] Testing candidate from ${res.strategyName}: ${res.url}`);
+                if (await validateStrategy(res)) {
+                    console.log(`[Logic] Winner: ${res.strategyName}`);
+                    return res;
+                }
+            }
+        }
+
+        // 2. Slow Batch (Serial - Complex/Tab/Scraper)
+        console.log(`[Logic] Fast Batch failed. Starting Slow Batch (Serial)...`);
+        
+        const slowStrategies = [
+            { name: 'PubMed Direct', fn: () => this.strategyPubMedDirect(pmid) },
+            { name: 'Embase', fn: () => this.strategyEmbase(isEmbasePui ? input : pmid) },
+            { name: 'LibKey', fn: () => this.strategyLibKey(pmid, doi) },
+            { name: 'Anna\'s Archive', fn: () => this.strategyAnnasArchiveScraper(pmid, doi) }
+        ];
+
+        if (enableSciHub) {
+            slowStrategies.push({ name: 'Sci-Hub', fn: () => this.strategySciHub(pmid) });
+        }
+
+        for (const { name, fn } of slowStrategies) {
+            try {
+                // Execute Strategy
+                const res = await fn();
+                if (res) {
+                    console.log(`[Logic] Testing candidate from ${name}: ${res.url}`);
+                    // Validate (Download & Save)
+                    if (await validateStrategy(res)) {
+                        console.log(`[Logic] Winner: ${name}`);
+                        return res;
+                    }
                 }
             } catch (e) {
-                console.log(`[Logic] Sci-Hub strategy failed: ${e.message}`);
+                // Strategy internal error (e.g. not found), just continue
+                // console.log(`[Logic] ${name} skipped: ${e.message}`);
             }
-        } else {
-            console.log(`[Logic] Sci-Hub strategy skipped by user configuration.`);
         }
 
-        // --- 5. Fallback: Web Scraping (Slow, uses PMCID) ---
-        const pmcid = await this.pmidToPmcid(pmid);
-        if (pmcid) {
-            const scrapeUrl = await this.getPdfFromWebpage(pmcid);
-            if (scrapeUrl) return { url: scrapeUrl, source: 'PMC Web Scraping', method: 'direct' };
-        }
+        // --- 4. Last Resort: PMC Web Scraping ---
+        try {
+            const pmcid = await this.pmidToPmcid(pmid);
+            if (pmcid) {
+                const scrapeUrl = await this.getPdfFromWebpage(pmcid);
+                if (scrapeUrl) {
+                    const res = { url: scrapeUrl, source: 'PMC Web Scraping', method: 'direct' };
+                    if (await validateStrategy(res)) return res;
+                }
+            }
+        } catch (e) {}
 
+        console.log(`[Logic] All strategies failed for ${pmid}`);
         return null;
     },
 
@@ -371,6 +360,37 @@ const PmidLogic = {
         return { url: url, source: 'LibKey.io', method: 'tab' };
     },
 
+    // 【新增】PubMed 官网跳转策略
+    async strategyPubMedDirect(pmid) {
+        // 1. 构造 PubMed 详情页 URL
+        const pubmedUrl = `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`;
+        
+        // 2. 返回结果，让 Dashboard 在 Tab 中打开
+        // Dashboard 的嗅探器会自动处理 "Full Text Links" 的点击和跳转
+        // 这是一个 Tab 策略，因为它依赖页面交互
+        return { 
+            url: pubmedUrl, 
+            source: 'PubMed Direct', 
+            method: 'tab' 
+        };
+    },
+
+    // 【新增】XsCntpj 策略
+    async strategyXsCntpj(pmid, doi) {
+        // 1. Get DOI (Required)
+        const validDoi = doi || await this.getDoiFromPmid(pmid);
+        if (!validDoi) throw new Error("No DOI for XsCntpj");
+
+        // 2. Construct Search URL
+        const searchUrl = `https://xs.cntpj.com/scholar?q=${encodeURIComponent(validDoi)}`;
+        
+        return { 
+            url: searchUrl, 
+            source: 'XsCntpj', 
+            method: 'tab' 
+        };
+    },
+
     // --- NEW HELPERS (Missing in previous code) ---
 
     // 【新增】URL 规则预测
@@ -500,6 +520,11 @@ const PmidLogic = {
                     'Accept': 'application/json'
                 }
             });
+
+            if (response.status === 404) {
+                // 404 is normal for "Full text not found in Elsevier", suppress warning
+                return null;
+            }
 
             if (!response.ok) {
                 console.warn(`Elsevier API error: ${response.status}`);

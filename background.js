@@ -1,18 +1,5 @@
 // background.js - Traffic Spoofing Center
 
-// Listen for switch commands from dashboard
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.action === 'enableSpoofing') {
-        applySpoofingRules();
-        sendResponse({ status: 'Spoofing Enabled' });
-    } else if (message.action === 'disableSpoofing') {
-        clearSpoofingRules();
-        sendResponse({ status: 'Spoofing Disabled' });
-    } else if (message.action === 'ping') {
-        sendResponse({ status: 'pong' });
-    }
-});
-
 const RULE_ID_SPOOF = 1;
 const RULE_ID_CSP = 2;
 
@@ -31,15 +18,25 @@ async function applySpoofingRules() {
                         // Spoof Referer to bypass publisher anti-bot checks
                         { "header": "Referer", "operation": "set", "value": "https://scholar.google.com/" },
                         // Remove headers that might expose the extension identity
-                        { "header": "Sec-Fetch-Site", "operation": "remove" }
+                        { "header": "Sec-Fetch-Site", "operation": "remove" },
+                        // Force fresh content (prevent 304 Not Modified)
+                        { "header": "If-Modified-Since", "operation": "remove" },
+                        { "header": "If-None-Match", "operation": "remove" }
                     ]
                 },
                 "condition": {
                     // Only apply to academic domains
                     "urlFilter": "*",
-                    "initiatorDomains": ["wiley.com", "onlinelibrary.wiley.com", "springer.com", "link.springer.com", "sciencedirect.com", "sci-hub.se", "sci-hub.st", "sci-hub.ru", "embase.com", "annas-archive.li"],
-                    // STRICTLY LIMIT spoofing to document requests and API calls. 
-                    // NEVER spoof scripts/styles/images, as it breaks CORS/CSP.
+                    "initiatorDomains": [
+                        "wiley.com", "onlinelibrary.wiley.com", 
+                        "springer.com", "link.springer.com", 
+                        "sciencedirect.com", 
+                        "sci-hub.se", "sci-hub.st", "sci-hub.ru", 
+                        "embase.com", 
+                        "annas-archive.li",
+                        "libkey.io",
+                        "pubmed.ncbi.nlm.nih.gov"
+                    ],
                     "resourceTypes": ["main_frame", "sub_frame", "xmlhttprequest"] 
                 }
             },
@@ -54,13 +51,19 @@ async function applySpoofingRules() {
                         { "header": "Content-Security-Policy-Report-Only", "operation": "remove" },
                         { "header": "X-Content-Security-Policy", "operation": "remove" },
                         { "header": "X-WebKit-CSP", "operation": "remove" },
-                        { "header": "X-Frame-Options", "operation": "remove" } // Also allow framing if needed
+                        { "header": "X-Frame-Options", "operation": "remove" },
+                        // Prevent caching to ensure CSP strip applies (Fix for persistent errors)
+                        { "header": "Cache-Control", "operation": "set", "value": "no-cache, no-store, must-revalidate" },
+                        { "header": "Pragma", "operation": "set", "value": "no-cache" },
+                        { "header": "Expires", "operation": "set", "value": "0" },
+                        // Add CORS headers to allow fetching from Dashboard
+                        { "header": "Access-Control-Allow-Origin", "operation": "set", "value": "*" },
+                        { "header": "Access-Control-Allow-Methods", "operation": "set", "value": "GET, POST, HEAD, OPTIONS" }
                     ]
                 },
                 "condition": {
                     // Aggressive: Remove CSP from EVERYTHING to prevent script blocking
                     "urlFilter": "*",
-                    // Removed initiatorDomains restriction to ensure it hits all possible iframes/scripts
                     "resourceTypes": ["main_frame", "sub_frame", "xmlhttprequest", "script", "stylesheet", "font", "image", "other"]
                 }
             }
@@ -76,14 +79,20 @@ async function clearSpoofingRules() {
     console.log("🚫 Rules Cleared");
 }
 
-// Listen for commands from dashboard
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (msg.action === 'startSniffing') {
-        // Save target Tab ID to storage so it persists through SW restarts
-        chrome.storage.local.set({ targetTabId: msg.tabId });
+// Apply rules on startup/install to ensure they are active before any tab opens
+chrome.runtime.onInstalled.addListener(applySpoofingRules);
+chrome.runtime.onStartup.addListener(applySpoofingRules);
 
-        console.log(`[Background] Started sniffing PDF traffic for Tab ${msg.tabId}`);
-        sendResponse({status: 'ok'});
+// Listen for switch commands from dashboard
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.action === 'enableSpoofing') {
+        applySpoofingRules().then(() => sendResponse({ status: 'Spoofing Enabled' }));
+        return true; // Keep channel open for async response
+    } else if (message.action === 'disableSpoofing') {
+        clearSpoofingRules().then(() => sendResponse({ status: 'Spoofing Disabled' }));
+        return true;
+    } else if (message.action === 'ping') {
+        sendResponse({ status: 'pong' });
     }
 });
 

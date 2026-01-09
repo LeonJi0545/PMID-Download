@@ -121,10 +121,11 @@
         
         <h3>Download Log</h3>
             <div id="logArea" class="log-container"></div>
-
-            <h3>Download Success</h3>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h3>Download Success</h3>
+                <button id="copySuccessBtn" class="secondary" style="padding: 5px 10px; font-size: 12px; height: 30px;" title="Copy Successful PMIDs">✅ Copy Success PMIDs</button>
+            </div>
             <div id="resultArea" class="log-container" style="height: 150px; border-top: 5px solid #f0f0f0; background: #ffffff; color: #333; border: 1px solid #ddd;"></div>
-
             <div style="display: flex; justify-content: space-between; align-items: center;">
                 <h3>Download Error</h3>
                 <div>
@@ -136,6 +137,7 @@
     </div>
     <!-- Include Logic Script First -->
     <script src="pmid_logic.js"></script>
+    <script src="sniffer.js"></script>
     <script src="dashboard.js"></script>
 </body>
 </html>
